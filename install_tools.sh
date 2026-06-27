@@ -79,7 +79,7 @@ pm_install() {
 pm_update() {
     case "$DISTRO" in
         ubuntu|debian|pop|linuxmint|elementary)
-            apt-get update -y
+            apt-get update -y || true
             ;;
         fedora|rhel|centos)
             dnf check-update || true
@@ -89,7 +89,7 @@ pm_update() {
             ;;
         *)
             if echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"; then
-                apt-get update -y
+                apt-get update -y || true
             fi
             ;;
     esac
@@ -271,11 +271,11 @@ elif is_debian_like; then
         install_from_github "eza-community/eza" "linux-gnu" "eza"
     }
     if [ -f /etc/apt/keyrings/gierens.gpg ]; then
-        echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de/stable/ ./" \
+        echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] https://deb.gierens.de/ stable main" \
             | tee /etc/apt/sources.list.d/gierens.list > /dev/null
         chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
         apt-get update 2>/dev/null && apt-get install -y eza 2>/dev/null && log_success "eza installed." \
-            || { log_warn "eza repo install failed. Falling back to binary."; install_from_github "eza-community/eza" "linux-gnu" "eza"; }
+            || { log_warn "eza repo install failed. Removing repo and falling back to binary."; rm -f /etc/apt/sources.list.d/gierens.list; install_from_github "eza-community/eza" "linux-gnu" "eza"; }
     fi
 elif is_fedora_like; then
     pm_install eza 2>/dev/null && log_success "eza installed." \
@@ -302,15 +302,6 @@ fi
 # --- HELIX EDITOR ---
 if command -v hx &>/dev/null; then
     log_success "Helix (hx) already installed."
-elif is_debian_like && [[ "$DISTRO" != "debian" ]]; then
-    log_info "Installing Helix via PPA..."
-    pm_install software-properties-common 2>/dev/null || true
-    add-apt-repository -y ppa:maveonair/helix-editor 2>/dev/null || log_warn "Could not add helix PPA."
-    apt-get update 2>/dev/null || true
-    apt-get install -y helix 2>/dev/null && log_success "Helix installed via PPA." || {
-        log_warn "PPA install failed. Installing binary with runtime support..."
-        install_from_github "helix-editor/helix" "linux" "hx" "true"
-    }
 else
     install_from_github "helix-editor/helix" "linux" "hx" "true"
 fi
