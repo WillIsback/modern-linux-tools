@@ -112,6 +112,9 @@ is_arch_like() {
 # ==============================================================================
 log_info "Installing base dependencies..."
 
+# Clean up any repo files left over from previous script runs
+rm -f /etc/apt/sources.list.d/gierens.list /etc/apt/sources.list.d/maveonair-helix-editor*.list 2>/dev/null || true
+
 pm_update
 
 # Common tools required everywhere
