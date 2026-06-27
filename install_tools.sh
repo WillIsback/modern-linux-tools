@@ -1,224 +1,381 @@
 #!/bin/bash
 
 # ==============================================================================
-# MODERN UNIX STACK INSTALLER
-# Adapte l'installation selon l'OS (Debian/Ubuntu, Fedora, Arch) et l'ARCH (x86, ARM)
+# MODERN LINUX TOOLKIT INSTALLER
+# Installs a curated set of modern CLI tools on Linux
+# Supports: Debian/Ubuntu, Fedora, Arch Linux
+# Architectures: x86_64, aarch64
 # ==============================================================================
 
-set -e # Arrête le script en cas d'erreur
+set -euo pipefail
 
-# Couleurs pour les logs
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-log_info() { echo -e "${BLUE}[INFO] $1${NC}"; }
-log_success() { echo -e "${GREEN}[OK] $1${NC}"; }
-log_error() { echo -e "${RED}[ERROR] $1${NC}"; }
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# 1. DÉTECTION DE L'ENVIRONNEMENT
+# ==============================================================================
+# ENVIRONMENT DETECTION
 # ==============================================================================
 ARCH=$(uname -m)
-OS=""
 DISTRO=""
+DISTRO_LIKE=""
 
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     DISTRO=$ID
+    DISTRO_LIKE=${ID_LIKE:-}
 fi
 
-case $ARCH in
-    x86_64)
-        log_info "Architecture détectée : x86_64"
-        GITHUB_ARCH="x86_64"
-        ;;
-    aarch64)
-        log_info "Architecture détectée : ARM64"
-        GITHUB_ARCH="arm64"
-        ;;
+case "$ARCH" in
+    x86_64)  log_info "Detected architecture: x86_64" ;;
+    aarch64) log_info "Detected architecture: ARM64 (aarch64)" ;;
     *)
-        log_error "Architecture $ARCH non supportée par ce script auto."
+        log_error "Unsupported architecture: $ARCH"
         exit 1
         ;;
 esac
 
-# Vérification des droits root
-if [ "$EUID" -ne 0 ]; then 
-  log_error "S'il vous plaît, lancez ce script avec sudo."
-  exit 1
+if [ "$EUID" -ne 0 ]; then
+    log_error "Please run this script with sudo."
+    exit 1
 fi
 
-# 2. INSTALLATION DES DÉPENDANCES DE BASE
 # ==============================================================================
-log_info "Mise à jour des paquets de base..."
-
-install_common() {
-    # Outils de base nécessaires pour télécharger/extraire
-    PACKAGES="curl wget git tar unzip fuse"
-    
-    # Outils souvent présents dans les dépôts officiels en version correcte
-    # ncdu, btop, jq, ripgrep, fzf
-    # Note: bat et fd ont souvent des noms bizarres (batcat, fdfind) sur Debian
-    
-    if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" || "$DISTRO" == "pop" ]]; then
-        apt-get update -y
-        apt-get install -y $PACKAGES ncdu btop jq ripgrep fzf fd-find bat
-        
-        # Fix pour Ubuntu : mapping des noms
-        if ! command -v fd &> /dev/null; then ln -s $(which fdfind) /usr/local/bin/fd; fi
-        if ! command -v bat &> /dev/null; then ln -s $(which batcat) /usr/local/bin/bat; fi
-
-    elif [[ "$DISTRO" == "fedora" ]]; then
-        dnf install -y $PACKAGES ncdu btop jq ripgrep fzf fd-find bat
-
-    elif [[ "$DISTRO" == "arch" || "$DISTRO" == "manjaro" ]]; then
-        pacman -Sy --noconfirm $PACKAGES ncdu btop jq ripgrep fzf fd bat
-    fi
+# PACKAGE MANAGER HELPERS
+# ==============================================================================
+pm_install() {
+    case "$DISTRO" in
+        ubuntu|debian|pop|linuxmint|elementary)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+            ;;
+        fedora|rhel|centos)
+            dnf install -y "$@"
+            ;;
+        arch|manjaro|endeavouros)
+            pacman -Sy --noconfirm "$@"
+            ;;
+        *)
+            if echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+            elif echo "$DISTRO_LIKE" | grep -qi "fedora\|rhel\|centos"; then
+                dnf install -y "$@"
+            elif echo "$DISTRO_LIKE" | grep -qi "arch"; then
+                pacman -Sy --noconfirm "$@"
+            else
+                log_warn "Unknown distro ($DISTRO), cannot install: $*"
+                return 1
+            fi
+            ;;
+    esac
 }
 
-install_common
+pm_update() {
+    case "$DISTRO" in
+        ubuntu|debian|pop|linuxmint|elementary)
+            apt-get update -y
+            ;;
+        fedora|rhel|centos)
+            dnf check-update || true
+            ;;
+        arch|manjaro|endeavouros)
+            pacman -Sy --noconfirm
+            ;;
+        *)
+            if echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"; then
+                apt-get update -y
+            fi
+            ;;
+    esac
+}
 
-# 3. INSTALLATION MANUELLE DES OUTILS MODERNES (Pour avoir la dernière version)
+is_debian_like() {
+    [[ "$DISTRO" =~ ^(ubuntu|debian|pop|linuxmint|elementary)$ ]] || echo "$DISTRO_LIKE" | grep -qi "debian\|ubuntu"
+}
+
+is_fedora_like() {
+    [[ "$DISTRO" =~ ^(fedora|rhel|centos)$ ]] || echo "$DISTRO_LIKE" | grep -qi "fedora\|rhel\|centos"
+}
+
+is_arch_like() {
+    [[ "$DISTRO" =~ ^(arch|manjaro|endeavouros)$ ]] || echo "$DISTRO_LIKE" | grep -qi "arch"
+}
+
+# ==============================================================================
+# BASE DEPENDENCIES
+# ==============================================================================
+log_info "Installing base dependencies..."
+
+pm_update
+
+# Common tools required everywhere
+BASE_DEPS="curl wget git tar unzip gpg ca-certificates"
+
+if is_debian_like; then
+    pm_install $BASE_DEPS xz-utils software-properties-common
+elif is_fedora_like; then
+    pm_install $BASE_DEPS xz
+elif is_arch_like; then
+    pm_install $BASE_DEPS xz
+fi
+
+# Verify essential tools are available
+for cmd in curl wget tar unzip gpg; do
+    if ! command -v "$cmd" &>/dev/null; then
+        log_error "Essential tool '$cmd' is missing after install attempt."
+        exit 1
+    fi
+done
+
+log_success "Base dependencies ready."
+
+# ==============================================================================
+# GITHUB RELEASE INSTALLER
 # ==============================================================================
 INSTALL_DIR="/usr/local/bin"
 
-# Fonction générique pour récupérer la dernière release GitHub
-# Usage: install_from_github "user/repo" "filtre_grep" "nom_binaire"
 install_from_github() {
-    REPO=$1
-    FILTER=$2
-    BINARY_NAME=$3
-    
-    log_info "Installation de $BINARY_NAME depuis $REPO..."
+    local repo="$1"
+    local filter="$2"
+    local binary_name="$3"
+    local needs_runtime="${4:-false}"
 
-    # Récupérer l'URL de la dernière release
-    LATEST_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | \
-        grep "browser_download_url" | \
-        grep -i "$FILTER" | \
-        grep -i "$GITHUB_ARCH" | \
-        grep -v "sha" | \
-        cut -d '"' -f 4 | head -n 1)
+    log_info "Installing $binary_name from $repo..."
 
-    if [ -z "$LATEST_URL" ]; then
-        log_error "Impossible de trouver l'URL pour $BINARY_NAME ($REPO). Vérifiez l'architecture."
-        return
-    fi
-
-    TEMP_DIR=$(mktemp -d)
-    FILENAME=$(basename "$LATEST_URL")
-    
-    curl -L -o "$TEMP_DIR/$FILENAME" "$LATEST_URL"
-
-    # Extraction intelligente
-    if [[ "$FILENAME" == *.tar.gz ]]; then
-        tar -xzf "$TEMP_DIR/$FILENAME" -C "$TEMP_DIR"
-    elif [[ "$FILENAME" == *.zip ]]; then
-        unzip -q "$TEMP_DIR/$FILENAME" -d "$TEMP_DIR"
-    fi
-
-    # Recherche du binaire et déplacement
-    FIND_BIN=$(find "$TEMP_DIR" -type f -name "$BINARY_NAME" | head -n 1)
-    if [ -n "$FIND_BIN" ]; then
-        mv "$FIND_BIN" "$INSTALL_DIR/$BINARY_NAME"
-        chmod +x "$INSTALL_DIR/$BINARY_NAME"
-        log_success "$BINARY_NAME installé avec succès."
+    # Arch filter: some projects use "x86_64"/"aarch64", others "x86_64"/"arm64"
+    local arch_filter
+    if [ "$ARCH" = "x86_64" ]; then
+        arch_filter="x86_64|amd64"
     else
-        log_error "Binaire non trouvé dans l'archive pour $BINARY_NAME"
+        arch_filter="(aarch64|arm64)"
     fi
 
-    rm -rf "$TEMP_DIR"
+    local api_response
+    api_response=$(curl -sfL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null || true)
+
+    if [ -z "$api_response" ]; then
+        log_warn "Could not reach GitHub API for $repo. Check your internet connection. Skipping."
+        return 1
+    fi
+
+    local download_url
+    download_url=$(echo "$api_response" \
+        | grep "browser_download_url" \
+        | grep -iE "$filter" \
+        | grep -iE "$arch_filter" \
+        | grep -viE 'no_libgit|-dbg-|-debug-' \
+        | grep -vE '\.(sha256|sha512|asc|sig|sum)$' \
+        | grep -v 'sha256sum' \
+        | cut -d '"' -f 4 \
+        | head -n 1)
+
+    if [ -z "$download_url" ]; then
+        log_warn "Could not find a matching download for $binary_name (filter: $filter, arch: $ARCH). Skipping."
+        return 1
+    fi
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local filename
+    filename=$(basename "$download_url")
+
+    log_info "  Downloading $filename..."
+    curl -#fL -o "$tmpdir/$filename" "$download_url" || {
+        log_warn "Download failed for $binary_name. Skipping."
+        rm -rf "$tmpdir"
+        return 1
+    }
+
+    case "$filename" in
+        *.tar.xz)
+            tar -xJf "$tmpdir/$filename" -C "$tmpdir"
+            ;;
+        *.tar.gz|*.tgz)
+            tar -xzf "$tmpdir/$filename" -C "$tmpdir"
+            ;;
+        *.zip)
+            unzip -qo "$tmpdir/$filename" -d "$tmpdir"
+            ;;
+        *.deb)
+            log_info "  Installing .deb package directly..."
+            dpkg -i "$tmpdir/$filename" 2>/dev/null || {
+                log_warn "Direct .deb install failed, extracting binary..."
+                mkdir -p "$tmpdir/deb_extract"
+                dpkg-deb -x "$tmpdir/$filename" "$tmpdir/deb_extract"
+                local bin_path
+                bin_path=$(find "$tmpdir/deb_extract" -type f -name "$binary_name" 2>/dev/null | head -n 1)
+                if [ -n "$bin_path" ]; then
+                    cp "$bin_path" "$INSTALL_DIR/$binary_name"
+                    chmod +x "$INSTALL_DIR/$binary_name"
+                    log_success "$binary_name extracted from .deb to $INSTALL_DIR/$binary_name"
+                fi
+            }
+            rm -rf "$tmpdir"
+            return 0
+            ;;
+        *)
+            log_warn "Unknown archive format: $filename. Skipping $binary_name."
+            rm -rf "$tmpdir"
+            return 1
+            ;;
+    esac
+
+    local binary_path
+    binary_path=$(find "$tmpdir" -type f -name "$binary_name" 2>/dev/null | head -n 1)
+
+    if [ -n "$binary_path" ]; then
+        cp "$binary_path" "$INSTALL_DIR/$binary_name"
+        chmod +x "$INSTALL_DIR/$binary_name"
+        log_success "$binary_name installed to $INSTALL_DIR/$binary_name"
+    else
+        log_warn "Binary '$binary_name' not found inside the extracted archive."
+        ls -la "$tmpdir" 2>/dev/null | head -5
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Install runtime support directory if requested (e.g., helix runtime/ tree)
+    if [ "$needs_runtime" = "true" ]; then
+        local runtime_src
+        runtime_src=$(find "$tmpdir" -type d -name "runtime" 2>/dev/null | head -n 1)
+        if [ -n "$runtime_src" ]; then
+            mkdir -p "/usr/lib/$binary_name"
+            cp -r "$runtime_src" "/usr/lib/$binary_name/"
+            log_success "Runtime files installed to /usr/lib/$binary_name/runtime"
+        else
+            log_warn "No 'runtime' directory found for $binary_name."
+        fi
+    fi
+
+    rm -rf "$tmpdir"
 }
 
-# --- EZA (Remplacement ls) ---
-# Eza est complexe à installer via binaire simple (dépendances libgit2). 
-# On préfère la méthode officielle gpg pour Debian/Ubuntu si possible, sinon cargo.
-if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" ]]; then
+# ==============================================================================
+# TOOL INSTALLATION
+# ==============================================================================
+
+# --- EZA (modern ls replacement) ---
+if command -v eza &>/dev/null; then
+    log_success "eza already installed."
+elif is_debian_like; then
+    log_info "Installing eza from official repository..."
     mkdir -p /etc/apt/keyrings
-    wget -qO- https://raw.githubusercontent.com/eza-community/eza/main/deb.asc | gpg --dearmor -o /etc/apt/keyrings/gierens.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de/stable/ ./" | tee /etc/apt/sources.list.d/gierens.list
-    chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
-    apt-get update && apt-get install -y eza
-elif [[ "$DISTRO" == "fedora" ]]; then
-    dnf install -y eza
-elif [[ "$DISTRO" == "arch" ]]; then
-    pacman -S --noconfirm eza
+    wget -qO- https://raw.githubusercontent.com/eza-community/eza/main/deb.asc 2>/dev/null | gpg --dearmor -o /etc/apt/keyrings/gierens.gpg 2>/dev/null || {
+        log_warn "eza GPG key import failed. Falling back to binary install."
+        install_from_github "eza-community/eza" "linux-gnu" "eza"
+    }
+    if [ -f /etc/apt/keyrings/gierens.gpg ]; then
+        echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de/stable/ ./" \
+            | tee /etc/apt/sources.list.d/gierens.list > /dev/null
+        chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
+        apt-get update 2>/dev/null && apt-get install -y eza 2>/dev/null && log_success "eza installed." \
+            || { log_warn "eza repo install failed. Falling back to binary."; install_from_github "eza-community/eza" "linux-gnu" "eza"; }
+    fi
+elif is_fedora_like; then
+    pm_install eza 2>/dev/null && log_success "eza installed." \
+        || { log_warn "eza package not found in repos. Trying binary..."; install_from_github "eza-community/eza" "linux-gnu" "eza"; }
+elif is_arch_like; then
+    pm_install eza && log_success "eza installed."
 else
-    # Fallback binaire (peut échouer selon libs)
     install_from_github "eza-community/eza" "linux-gnu" "eza"
 fi
 
-# --- LAZY TOOLS & HELIX & YAZI ---
-# Ces outils sont distribués proprement en binaires statiques (Go/Rust)
+# --- REPO-BASED TOOLS (ncdu, btop, jq, ripgrep, fzf, fd, bat) ---
+if is_debian_like; then
+    log_info "Installing repo-based tools..."
+    pm_install ncdu btop jq ripgrep fzf fd-find bat
+    # Debian/Ubuntu ship fd as fdfind and bat as batcat
+    command -v fd &>/dev/null || command -v fdfind &>/dev/null && ln -sf "$(which fdfind)" /usr/local/bin/fd || true
+    command -v bat &>/dev/null || command -v batcat &>/dev/null && ln -sf "$(which batcat)" /usr/local/bin/bat || true
+elif is_fedora_like; then
+    pm_install ncdu btop jq ripgrep fzf fd-find bat
+elif is_arch_like; then
+    pm_install ncdu btop jq ripgrep fzf fd bat
+fi
 
-# LazyGit
-install_from_github "jesseduffield/lazygit" "Linux" "lazygit"
+# --- HELIX EDITOR ---
+if command -v hx &>/dev/null; then
+    log_success "Helix (hx) already installed."
+elif is_debian_like && [[ "$DISTRO" != "debian" ]]; then
+    log_info "Installing Helix via PPA..."
+    pm_install software-properties-common 2>/dev/null || true
+    add-apt-repository -y ppa:maveonair/helix-editor 2>/dev/null || log_warn "Could not add helix PPA."
+    apt-get update 2>/dev/null || true
+    apt-get install -y helix 2>/dev/null && log_success "Helix installed via PPA." || {
+        log_warn "PPA install failed. Installing binary with runtime support..."
+        install_from_github "helix-editor/helix" "linux" "hx" "true"
+    }
+else
+    install_from_github "helix-editor/helix" "linux" "hx" "true"
+fi
 
-# LazyDocker
-install_from_github "jesseduffield/lazydocker" "Linux" "lazydocker"
-
-# LazySQL
-install_from_github "jorgerojas26/lazysql" "linux" "lazysql"
-
-# Helix (Editeur)
-install_from_github "helix-editor/helix" "linux" "hx"
-# Note: Helix a besoin de ses fichiers runtime. 
-# Pour une install propre via script simple, on télécharge l'AppImage si dispo ou on avertit.
-# Ici on a pris le binaire, mais il manquera le dossier 'runtime'.
-# Correction pour Helix : Installation via AppImage pour simplicité ou Package Manager si dispo.
-if ! command -v hx &> /dev/null; then
-    log_info "Tentative installation Helix via PPA/Dépôt (plus fiable pour le runtime)..."
-    if [[ "$DISTRO" == "ubuntu" ]]; then
-        add-apt-repository -y ppa:maveonair/helix-editor
-        apt update && apt install -y helix
+if command -v hx &>/dev/null; then
+    HELIX_RUNTIME=$(hx --health 2>/dev/null | grep "runtime" | head -1 || echo "")
+    if echo "$HELIX_RUNTIME" | grep -qi "not found\|missing\|error"; then
+        if [ -d "/usr/lib/hx/runtime" ]; then
+            export HELIX_RUNTIME=/usr/lib/hx/runtime
+            log_info "Set HELIX_RUNTIME=/usr/lib/hx/runtime"
+        fi
     fi
 fi
 
-# Yazi (File Manager)
-# Yazi est très récent, binaire direct recommandé
-install_from_github "sxyazi/yazi" "linux-musl" "yazi"
+# --- LAZYGIT ---
+install_from_github "jesseduffield/lazygit" "Linux" "lazygit"
 
+# --- LAZYDOCKER ---
+install_from_github "jesseduffield/lazydocker" "Linux" "lazydocker"
 
-# 4. CONFIGURATION SHELL (ALIASES)
+# --- LAZYSQL ---
+install_from_github "jorgerojas26/lazysql" "Linux" "lazysql"
+
+# --- YAZI (terminal file manager) ---
+# Prefer .deb on Debian/Ubuntu, otherwise use musl zip
+if is_debian_like; then
+    install_from_github "sxyazi/yazi" "linux-gnu" "yazi"
+else
+    install_from_github "sxyazi/yazi" "linux-musl" "yazi"
+fi
+
 # ==============================================================================
-log_info "Génération des suggestions de configuration..."
+# SUMMARY & SHELL CONFIGURATION
+# ==============================================================================
+echo ""
+echo "================================================================"
+echo -e "${GREEN}INSTALLATION COMPLETE${NC}"
+echo "================================================================"
+echo ""
 
-CONFIG_TEXT=$(cat <<EOF
+installed_list=""
+for tool in eza hx lazygit lazydocker lazysql yazi ncdu btop jq rg fzf fd bat; do
+    if command -v "$tool" &>/dev/null; then
+        installed_list+="  ${GREEN}✓${NC} $tool\n"
+    else
+        installed_list+="  ${RED}✗${NC} $tool\n"
+    fi
+done
+echo -e "$installed_list"
 
-# --- MODERN UNIX ALIASES ---
-# Ajoutez ceci à votre .bashrc ou .zshrc
-
-# ls -> eza
+echo ""
+echo "To enable the new tools, add these aliases to ~/.bashrc or ~/.zshrc:"
+echo ""
+cat <<'CONFIG_EOF'
+# --- MODERN LINUX ALIASES ---
 alias ls='eza --icons --group-directories-first'
 alias ll='eza -alF --icons --group-directories-first'
 alias tree='eza --tree --icons'
-
-# cat -> bat
 alias cat='bat'
-
-# find -> fd
-# (fd est déjà court, mais pour mémoire)
-alias findfast='fd'
-
-# grep -> rg
 alias grep='rg'
-
-# Navigation
 alias fm='yazi'
 alias lg='lazygit'
 alias ld='lazydocker'
-alias lsql='lazysql'
-alias hx='helix'
-
-# Utils
 alias usage='ncdu --color dark -rr -x --exclude .git --exclude node_modules'
-
-EOF
-)
-
-echo "----------------------------------------------------------------"
-echo -e "${GREEN}INSTALLATION TERMINÉE !${NC}"
-echo "----------------------------------------------------------------"
-echo "Pour activer les outils, ajoutez les lignes suivantes à votre fichier ~/.bashrc ou ~/.zshrc :"
-echo "$CONFIG_TEXT"
-echo "----------------------------------------------------------------"
+CONFIG_EOF
+echo ""
+echo "Then run: source ~/.bashrc"
+echo "================================================================"
